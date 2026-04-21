@@ -1,0 +1,10 @@
+# 忽略資料集
+dataset/
+
+# 忽略訓練產出的超大權重檔與日誌
+output/
+*.pth
+
+# 忽略 Python 暫存檔
+__pycache__/
+*.pyc

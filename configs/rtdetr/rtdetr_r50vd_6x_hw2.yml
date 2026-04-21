@@ -1,0 +1,17 @@
+__include__: [
+  '../dataset/hw2_detection.yml',
+  '../runtime.yml',
+  './include/dataloader.yml',
+  './include/optimizer.yml',
+  './include/rtdetr_r50vd.yml',
+]
+
+output_dir: ./output/0421_rtdetr_r50vd_6x_hw2
+
+use_tensorboard: True
+
+# 找到或是新增 lr_scheduler 部分
+lr_scheduler:
+  type: CosineAnnealingLR
+  T_max: 50    # 通常設定為總 Epoch 數
+  eta_min: 0.000001 # 學習率下降的最低點
