@@ -1,8 +1,8 @@
 # 忽略資料集
-dataset/
+/dataset/
 
 # 忽略訓練產出的超大權重檔與日誌
-output/
+/output/
 *.pth
 
 # 忽略 Python 暫存檔

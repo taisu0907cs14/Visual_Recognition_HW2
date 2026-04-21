@@ -14,4 +14,3 @@ ema:
   type: ModelEMA
   decay: 0.9999
   warmups: 2000
-

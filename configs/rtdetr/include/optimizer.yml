@@ -33,4 +33,3 @@ lr_scheduler:
   type: MultiStepLR
   milestones: [1000]
   gamma: 0.1
-

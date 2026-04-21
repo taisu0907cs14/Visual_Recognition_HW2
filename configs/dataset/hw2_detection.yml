@@ -1,0 +1,45 @@
+task: detection
+
+num_classes: 11
+remap_mscoco_category: False  # <--- 改為 False
+
+train_dataloader:
+  type: DataLoader
+  dataset:
+    type: CocoDetection
+    img_folder: ./dataset/nycu-hw2-data/train/
+    ann_file: ./dataset/nycu-hw2-data/train.json
+    transforms:
+      type: Compose
+      ops:  # <--- 把原版 coco 的資料擴增與前處理補上 (以下為 RT-DETR 常見預設)
+        - {type: RandomPhotometricDistort, p: 0.5}
+        - {type: RandomZoomOut, fill: 0}
+        - {type: RandomIoUCrop, p: 0.8}
+        - {type: SanitizeBoundingBox, min_size: 1}
+        - {type: RandomHorizontalFlip}
+        - {type: Resize, size: [640, 640]} # 🔥 統一改為 640，表裡如一
+        - {type: ToImageTensor}
+        - {type: ConvertDtype}
+        - {type: SanitizeBoundingBox, min_size: 1}
+        - {type: ConvertBoundingBox, out_fmt: 'cxcywh', normalize: True}
+  shuffle: True
+  batch_size: 64
+  num_workers: 16
+  drop_last: True
+
+val_dataloader:
+  type: DataLoader
+  dataset:
+    type: CocoDetection
+    img_folder: ./dataset/nycu-hw2-data/valid/
+    ann_file: ./dataset/nycu-hw2-data/valid.json
+    transforms:
+      type: Compose
+      ops: 
+        - {type: Resize, size: [640, 640]} # 🔥 統一改為 640
+        - {type: ToImageTensor}
+        - {type: ConvertDtype}
+  shuffle: False
+  batch_size: 64
+  num_workers: 16
+  drop_last: False

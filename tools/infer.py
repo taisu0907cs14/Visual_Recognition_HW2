@@ -1,203 +1,204 @@
+import os
+import sys
+import json
 import torch
-import torch.nn as nn 
+import torch.nn as nn
 import torchvision.transforms as T
-from torch.cuda.amp import autocast
-import numpy as np 
-from PIL import Image, ImageDraw, ImageFont
-import os 
-import sys 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
+from PIL import Image
+from tqdm import tqdm
 import argparse
-import src.misc.dist as dist 
-from src.core import YAMLConfig 
-from src.solver import TASKS
-import numpy as np
 
-def postprocess(labels, boxes, scores, iou_threshold=0.55):
-    def calculate_iou(box1, box2):
-        x1, y1, x2, y2 = box1
-        x3, y3, x4, y4 = box2
-        xi1 = max(x1, x3)
-        yi1 = max(y1, y3)
-        xi2 = min(x2, x4)
-        yi2 = min(y2, y4)
-        inter_width = max(0, xi2 - xi1)
-        inter_height = max(0, yi2 - yi1)
-        inter_area = inter_width * inter_height
-        box1_area = (x2 - x1) * (y2 - y1)
-        box2_area = (x4 - x3) * (y4 - y3)
-        union_area = box1_area + box2_area - inter_area
-        iou = inter_area / union_area if union_area != 0 else 0
-        return iou
-    merged_labels = []
-    merged_boxes = []
-    merged_scores = []
-    used_indices = set()
-    for i in range(len(boxes)):
-        if i in used_indices:
-            continue
-        current_box = boxes[i]
-        current_label = labels[i]
-        current_score = scores[i]
-        boxes_to_merge = [current_box]
-        scores_to_merge = [current_score]
-        used_indices.add(i)
-        for j in range(i + 1, len(boxes)):
-            if j in used_indices:
+import matplotlib
+matplotlib.use('Agg')  # 確保在沒有圖形介面的 Server/SSH 上畫圖不會報錯
+import matplotlib.pyplot as plt
+import matplotlib.patches as patches
+
+# 確保能引用到專案根目錄的 src
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
+from src.core import YAMLConfig
+
+def plot_training_logs(log_path, output_dir):
+    """讀取 log.txt 並畫出 Loss 與 mAP 的 PDF 曲線圖"""
+    if not os.path.exists(log_path):
+        print(f"⚠️ 找不到 Log 檔: {log_path}，跳過畫圖步驟。")
+        return
+
+    epochs = []
+    train_losses = []
+    val_mAP_50_95 = []
+    val_mAP_50 = []
+
+    print(f"📊 正在讀取訓練日誌並繪製圖表...")
+    with open(log_path, 'r') as f:
+        for line in f:
+            try:
+                data = json.loads(line.strip())
+                epochs.append(data['epoch'])
+                # 讀取訓練 Loss
+                train_losses.append(data.get('train_loss', 0))
+                
+                # 讀取驗證集 mAP (COCO 格式的 stats 陣列，索引 0 是 0.5:0.95，索引 1 是 0.5)
+                if 'test_coco_eval_bbox' in data:
+                    val_mAP_50_95.append(data['test_coco_eval_bbox'][0])
+                    val_mAP_50.append(data['test_coco_eval_bbox'][1])
+            except:
                 continue
-            if labels[j] != current_label:
-                continue  
-            other_box = boxes[j]
-            iou = calculate_iou(current_box, other_box)
-            if iou >= iou_threshold:
-                boxes_to_merge.append(other_box.tolist())  
-                scores_to_merge.append(scores[j])
-                used_indices.add(j)
-        xs = np.concatenate([[box[0], box[2]] for box in boxes_to_merge])
-        ys = np.concatenate([[box[1], box[3]] for box in boxes_to_merge])
-        merged_box = [np.min(xs), np.min(ys), np.max(xs), np.max(ys)]
-        merged_score = max(scores_to_merge)
-        merged_boxes.append(merged_box)
-        merged_labels.append(current_label)
-        merged_scores.append(merged_score)
-    return [np.array(merged_labels)], [np.array(merged_boxes)], [np.array(merged_scores)]
-def slice_image(image, slice_height, slice_width, overlap_ratio):
-    img_width, img_height = image.size
-    
-    slices = []
-    coordinates = []
-    step_x = int(slice_width * (1 - overlap_ratio))
-    step_y = int(slice_height * (1 - overlap_ratio))
-    
-    for y in range(0, img_height, step_y):
-        for x in range(0, img_width, step_x):
-            box = (x, y, min(x + slice_width, img_width), min(y + slice_height, img_height))
-            slice_img = image.crop(box)
-            slices.append(slice_img)
-            coordinates.append((x, y))
-    return slices, coordinates
-def merge_predictions(predictions, slice_coordinates, orig_image_size, slice_width, slice_height, threshold=0.30):
-    merged_labels = []
-    merged_boxes = []
-    merged_scores = []
-    orig_height, orig_width = orig_image_size
-    for i, (label, boxes, scores) in enumerate(predictions):
-        x_shift, y_shift = slice_coordinates[i]
-        scores = np.array(scores).reshape(-1)
-        valid_indices = scores > threshold
-        valid_labels = np.array(label).reshape(-1)[valid_indices]
-        valid_boxes = np.array(boxes).reshape(-1, 4)[valid_indices]
-        valid_scores = scores[valid_indices]
-        for j, box in enumerate(valid_boxes):
-            box[0] = np.clip(box[0] + x_shift, 0, orig_width)  
-            box[1] = np.clip(box[1] + y_shift, 0, orig_height)
-            box[2] = np.clip(box[2] + x_shift, 0, orig_width)  
-            box[3] = np.clip(box[3] + y_shift, 0, orig_height) 
-            valid_boxes[j] = box
-        merged_labels.extend(valid_labels)
-        merged_boxes.extend(valid_boxes)
-        merged_scores.extend(valid_scores)
-    return np.array(merged_labels), np.array(merged_boxes), np.array(merged_scores)
-def draw(images, labels, boxes, scores, thrh = 0.6, path = ""):
-    for i, im in enumerate(images):
-        draw = ImageDraw.Draw(im)
-        scr = scores[i]
-        lab = labels[i][scr > thrh]
-        box = boxes[i][scr > thrh]
-        scrs = scores[i][scr > thrh]
-        for j,b in enumerate(box):
-            draw.rectangle(list(b), outline='red',)
-            draw.text((b[0], b[1]), text=f"label: {lab[j].item()} {round(scrs[j].item(),2)}", font=ImageFont.load_default(), fill='blue')
-        if path == "":
-            im.save(f'results_{i}.jpg')
-        else:
-            im.save(path)
-            
-def main(args, ):
-    """main
-    """
+
+    # 1. 繪製 Training Loss 曲線
+    plt.figure(figsize=(8, 6))
+    plt.plot(epochs, train_losses, marker='o', markersize=4, linestyle='-', color='tab:blue', label='Train Loss')
+    plt.title('Training Loss per Epoch', fontsize=16)
+    plt.xlabel('Epoch', fontsize=14)
+    plt.ylabel('Loss', fontsize=14)
+    plt.grid(True, linestyle='--', alpha=0.7)
+    plt.legend(fontsize=12)
+    loss_pdf_path = os.path.join(output_dir, 'train_loss_curve.pdf')
+    plt.savefig(loss_pdf_path, format='pdf', bbox_inches='tight')
+    plt.close()
+
+    # 2. 繪製 Validation mAP 曲線
+    if val_mAP_50_95:
+        plt.figure(figsize=(8, 6))
+        plt.plot(epochs, val_mAP_50_95, marker='s', markersize=4, linestyle='-', color='tab:orange', label='mAP @ 0.5:0.95')
+        plt.plot(epochs, val_mAP_50, marker='^', markersize=4, linestyle='-', color='tab:green', label='mAP @ 0.5')
+        plt.title('Validation mAP per Epoch', fontsize=16)
+        plt.xlabel('Epoch', fontsize=14)
+        plt.ylabel('mAP', fontsize=14)
+        plt.grid(True, linestyle='--', alpha=0.7)
+        plt.legend(fontsize=12)
+        map_pdf_path = os.path.join(output_dir, 'val_mAP_curve.pdf')
+        plt.savefig(map_pdf_path, format='pdf', bbox_inches='tight')
+        plt.close()
+
+    print(f"✅ 圖表已儲存為 PDF: {loss_pdf_path} 與 {map_pdf_path}")
+
+
+def main(args):
+    # --- 模型初始化 ---
     cfg = YAMLConfig(args.config, resume=args.resume)
     if args.resume:
-        checkpoint = torch.load(args.resume, map_location='cpu') 
-        if 'ema' in checkpoint:
-            state = checkpoint['ema']['module']
-        else:
-            state = checkpoint['model']
+        checkpoint = torch.load(args.resume, map_location='cpu')
+        state = checkpoint['ema']['module'] if 'ema' in checkpoint else checkpoint['model']
     else:
         raise AttributeError('Only support resume to load model.state_dict by now.')
-    # NOTE load train mode state -> convert to deploy mode
+
     cfg.model.load_state_dict(state)
+
     class Model(nn.Module):
-        def __init__(self, ) -> None:
+        def __init__(self) -> None:
             super().__init__()
-            self.model = cfg.model.deploy()
-            self.postprocessor = cfg.postprocessor.deploy()
+            self.model = cfg.model
+            self.postprocessor = cfg.postprocessor
             
         def forward(self, images, orig_target_sizes):
             outputs = self.model(images)
             outputs = self.postprocessor(outputs, orig_target_sizes)
             return outputs
-    
+
     model = Model().to(args.device)
-    im_pil = Image.open(args.im_file).convert('RGB')
-    w, h = im_pil.size
-    orig_size = torch.tensor([w, h])[None].to(args.device)
-    
+    model.eval()
+
     transforms = T.Compose([
         T.Resize((640, 640)),  
         T.ToTensor(),
     ])
-    im_data = transforms(im_pil)[None].to(args.device)
-    if args.sliced:
-        num_boxes = args.numberofboxes
-        
-        aspect_ratio = w / h
-        num_cols = int(np.sqrt(num_boxes * aspect_ratio)) 
-        num_rows = int(num_boxes / num_cols)
-        slice_height = h // num_rows
-        slice_width = w // num_cols
-        overlap_ratio = 0.2
-        slices, coordinates = slice_image(im_pil, slice_height, slice_width, overlap_ratio)
-        predictions = []
-        for i, slice_img in enumerate(slices):
-            slice_tensor = transforms(slice_img)[None].to(args.device)
-            with autocast():  # Use AMP for each slice
-                output = model(slice_tensor, torch.tensor([[slice_img.size[0], slice_img.size[1]]]).to(args.device))
-            torch.cuda.empty_cache() 
-            labels, boxes, scores = output
+
+    results = []
+    image_filenames = [f for f in os.listdir(args.test_dir) if f.endswith(('.jpg', '.png', '.jpeg'))]
+    
+    print(f"Found {len(image_filenames)} images in {args.test_dir}")
+    print("Starting inference...")
+
+    # --- 推論與視覺化 ---
+    visualized_count = 0  # 紀錄已經視覺化了幾張圖片
+
+    with torch.no_grad():
+        for filename in tqdm(image_filenames):
+            filepath = os.path.join(args.test_dir, filename)
+            im_pil = Image.open(filepath).convert('RGB')
+            w, h = im_pil.size
             
-            labels = labels.cpu().detach().numpy()
-            boxes = boxes.cpu().detach().numpy()
-            scores = scores.cpu().detach().numpy()
-            predictions.append((labels, boxes, scores))
+            orig_size = torch.tensor([[w, h]]).to(args.device)
+            im_data = transforms(im_pil)[None].to(args.device)
+
+            output = model(im_data, orig_size)
+            
+            res = output[0]
+            labels = res['labels'].cpu().numpy()
+            boxes = res['boxes'].cpu().numpy()
+            scores = res['scores'].cpu().numpy()
+
+            image_id_int = int(os.path.splitext(filename)[0])
+
+            # 🔥 [新增] 視覺化前五張圖片
+            vis_boxes = []
+            vis_labels = []
+            vis_scores = []
+
+            for label, box, score in zip(labels, boxes, scores):
+                if score < 0.25:
+                    continue
+
+                x_min, y_min, x_max, y_max = box
+                width = float(x_max - x_min)
+                height = float(y_max - y_min)
+                category_id = int(label)
+
+                prediction = {
+                    "image_id": image_id_int,
+                    "bbox": [float(x_min), float(y_min), width, height],
+                    "score": float(score),
+                    "category_id": category_id
+                }
+                results.append(prediction)
+
+                # 收集要畫在圖上的資訊
+                vis_boxes.append([x_min, y_min, width, height])
+                vis_labels.append(category_id)
+                vis_scores.append(score)
+
+            # 畫出前 5 張圖片並存檔
+            if visualized_count < 5:
+                fig, ax = plt.subplots(1, figsize=(6, 6))
+                ax.imshow(im_pil)
+                for (vx, vy, vw, vh), vlbl, vscr in zip(vis_boxes, vis_labels, vis_scores):
+                    # 畫紅框
+                    rect = patches.Rectangle((vx, vy), vw, vh, linewidth=2, edgecolor='red', facecolor='none')
+                    ax.add_patch(rect)
+                    # 寫標籤
+                    text_str = f"ID:{vlbl} ({vscr:.2f})"
+                    ax.text(vx, max(vy - 2, 0), text_str, color='white', fontsize=10, 
+                            bbox=dict(facecolor='red', alpha=0.7, edgecolor='none', pad=1))
+                
+                plt.axis('off')
+                # 將圖片存成 PDF 與 PNG 兩種格式，方便報告使用
+                vis_pdf_path = os.path.join(os.path.dirname(args.output), f'vis_test_{image_id_int}.pdf')
+                vis_png_path = os.path.join(os.path.dirname(args.output), f'vis_test_{image_id_int}.png')
+                plt.savefig(vis_pdf_path, format='pdf', bbox_inches='tight', pad_inches=0)
+                plt.savefig(vis_png_path, format='png', bbox_inches='tight', pad_inches=0, dpi=300)
+                plt.close()
+                visualized_count += 1
+
+    with open(args.output, 'w', encoding='utf-8') as f:
+        json.dump(results, f, indent=4)
         
-        merged_labels, merged_boxes, merged_scores = merge_predictions(predictions, coordinates, (h, w), slice_width, slice_height)
-        labels, boxes, scores = postprocess(merged_labels, merged_boxes, merged_scores)
-    else:
-        output = model(im_data, orig_size)
-        labels, boxes, scores = output
-        
-    draw([im_pil], labels, boxes, scores, 0.6)
-  
+    print(f"✅ Submission file generated! Saved {len(results)} entries to {args.output}")
+
+    # --- 繪製訓練日誌圖表 ---
+    # 自動推斷 log.txt 的路徑 (通常與你傳入的 checkpoint 在同一個目錄)
+    ckpt_dir = os.path.dirname(args.resume)
+    log_file_path = os.path.join(ckpt_dir, 'log.txt')
+    output_graph_dir = os.path.dirname(args.output) if os.path.dirname(args.output) != '' else '.'
+    
+    plot_training_logs(log_file_path, output_graph_dir)
+
+
 if __name__ == '__main__':
-    import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument('-c', '--config', type=str, )
-    parser.add_argument('-r', '--resume', type=str, )
-    parser.add_argument('-f', '--im-file', type=str, )
-    parser.add_argument('-s', '--sliced', type=bool, default=False)
-    parser.add_argument('-d', '--device', type=str, default='cpu')
-    parser.add_argument('-nc', '--numberofboxes', type=int, default=25)
+    parser.add_argument('-c', '--config', type=str, required=True)
+    parser.add_argument('-r', '--resume', type=str, required=True)
+    parser.add_argument('-d', '--device', type=str, default='cuda:0')
+    parser.add_argument('-t', '--test-dir', type=str, required=True)
+    parser.add_argument('-o', '--output', type=str, default='pred.json')
     args = parser.parse_args()
     main(args)
-
-
-
-
-
-
-
-
-
-
-
