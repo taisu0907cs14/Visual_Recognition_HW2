@@ -11,7 +11,7 @@ Our solution is built upon the **RT-DETR (Real-Time DEtection TRansformer)** arc
 ### Key Features
 - **CBAM Integration:** Enhanced feature representation through sequential channel and spatial attention mechanisms during cross-scale fusion.
 - **Optimized Training Strategy:** Employed a Cosine Annealing learning rate scheduler to ensure stable convergence in the final epochs.
-- **Custom Inference & Visualization:** The provided `generate_submission.py` script not only outputs the perfectly calibrated `pred.json` (COCO format) but also automatically generates high-quality PDF/PNG training curves and qualitative bounding-box visualizations for easy analysis.
+- **Custom Inference & Visualization:** The provided `infer.py` script not only outputs the perfectly calibrated `pred.json` (COCO format) but also automatically generates high-quality PDF/PNG training curves and qualitative bounding-box visualizations for easy analysis.
 
 ## Environment Setup
 Follow the steps below to set up the Conda environment and install the required dependencies:

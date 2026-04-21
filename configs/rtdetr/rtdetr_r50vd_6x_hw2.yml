@@ -6,10 +6,10 @@ __include__: [
   './include/rtdetr_r50vd.yml',
 ]
 
-output_dir: ./output/0421-1_rtdetr_r50vd_6x_hw2
+output_dir: ./output/0417_rtdetr_r50vd_6x_hw2
 
 # 找到或是新增 lr_scheduler 部分
 lr_scheduler:
   type: CosineAnnealingLR
-  T_max: 50    # 通常設定為總 Epoch 數
+  T_max: 72    
   eta_min: 0.000001 # 學習率下降的最低點
